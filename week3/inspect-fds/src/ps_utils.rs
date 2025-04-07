@@ -129,7 +129,7 @@ fn get_pid_by_command_name(name: &str) -> Result<Option<usize>, Error> {
 /// command name (e.g. "./subprocess_test") or a PID (e.g. "5612"). This function returns a
 /// Process struct if the specified process was found, None if no matching processes were found, or
 /// Error if an error was encountered in running ps or pgrep.
-#[allow(unused)] // TODO: delete this line for Milestone 1
+// #[allow(unused)] // delete this line for Milestone 1
 pub fn get_target(query: &str) -> Result<Option<Process>, Error> {
     let pid_by_command = get_pid_by_command_name(query)?;
     if pid_by_command.is_some() {
