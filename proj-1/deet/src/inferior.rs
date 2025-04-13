@@ -37,25 +37,53 @@ pub struct Inferior {
 impl Inferior {
     /// Attempts to start a new inferior process. Returns Some(Inferior) if successful, or None if
     /// an error is encountered.
-    pub fn new(target: &str, args: &Vec<String>) -> Option<Inferior> {
-        // println!(
-        //     "Inferior::new not implemented! target={}, args={:?}",
-        //     target, args
-        // );
+    pub fn new(target: &str, args: &Vec<String>, breakpoints: &Vec<u64>) -> Option<Inferior> {
         let mut cmd = Command::new(&target);
         let cmd = cmd.args(args);
 
         unsafe { cmd.pre_exec(child_traceme) };
+        let child = cmd.spawn().expect("couldn't create the child process");
 
-        let mut child = cmd.spawn().expect("couldn't create the child process");
+        let mut inferior = Inferior { child };
 
-        Some(Inferior { child })
+        let status = inferior.wait(None).unwrap();
+        match status {
+            Status::Stopped(_, _) => (),
+            _ => return None,
+        }
+
+        for breakpoint in breakpoints {
+            inferior.add_breakpoint(breakpoint);
+        }
+        Some(inferior)
+    }
+
+    pub fn add_breakpoint(&mut self, breakpoint: &u64) {
+        match self.write_byte(*breakpoint, 0xcc) {
+            Ok(_) => (),
+            Err(error) => println!("Error while adding breakpoint: {:?}", error),
+        }
     }
 
     pub fn kill(&mut self) -> () {
         self.child.kill().expect("couldn't kill the process");
         let status = self.child.wait().expect("failed to reap child");
         println!("Killed inferior process {} with {}", self.pid(), status);
+    }
+
+    fn write_byte(&mut self, addr: u64, val: u8) -> Result<u8, nix::Error> {
+        let aligned_addr = align_addr_to_word(addr);
+        let byte_offset = addr - aligned_addr;
+        let word = ptrace::read(self.pid(), aligned_addr as ptrace::AddressType)? as u64;
+        let orig_byte = (word >> 8 * byte_offset) & 0xff;
+        let masked_word = word & !(0xff << 8 * byte_offset);
+        let updated_word = masked_word | ((val as u64) << 8 * byte_offset);
+        ptrace::write(
+            self.pid(),
+            aligned_addr as ptrace::AddressType,
+            updated_word as *mut std::ffi::c_void,
+        )?;
+        Ok(orig_byte as u8)
     }
 
     pub fn cont(&self) -> Result<Status, nix::Error> {
@@ -101,14 +129,18 @@ impl Inferior {
                 .unwrap_or(String::from("couldn't find the function"));
 
             println!("{} ({})", function, line);
-            if function == String::from("main"){
+            if function == String::from("main") {
                 break;
             }
             rbp_plus_8 = rbp + 8;
-            rip = ptrace::read(self.pid(),rbp_plus_8  as ptrace::AddressType)? as usize;
+            rip = ptrace::read(self.pid(), rbp_plus_8 as ptrace::AddressType)? as usize;
             rbp = ptrace::read(self.pid(), rbp as ptrace::AddressType)? as usize;
         }
 
         Ok(())
     }
+}
+
+fn align_addr_to_word(addr: u64) -> u64 {
+    addr & (-(size_of::<u64>() as i64) as u64)
 }

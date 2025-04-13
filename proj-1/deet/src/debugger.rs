@@ -1,5 +1,5 @@
 use crate::debugger_command::DebuggerCommand;
-use crate::dwarf_data::{DwarfData, Line, Error as DwarfError};
+use crate::dwarf_data::{DwarfData, Error as DwarfError, Line};
 use crate::inferior::{Inferior, Status};
 use rustyline::error::ReadlineError;
 use rustyline::Editor;
@@ -9,6 +9,7 @@ pub struct Debugger {
     history_path: String,
     readline: Editor<()>,
     debug_data: DwarfData,
+    breakpoints: Vec<u64>,
     inferior: Option<Inferior>,
 }
 
@@ -29,6 +30,8 @@ impl Debugger {
             }
         };
 
+        debug_data.print();
+
         let history_path = format!("{}/.deet_history", std::env::var("HOME").unwrap());
         let mut readline = Editor::<()>::new();
         // Attempt to load history from ~/.deet_history if it exists
@@ -39,6 +42,7 @@ impl Debugger {
             history_path,
             readline,
             debug_data,
+            breakpoints: vec![],
             inferior: None,
         }
     }
@@ -83,21 +87,15 @@ impl Debugger {
             match self.get_next_command() {
                 DebuggerCommand::Run(args) => {
                     self.flush_inferior();
-                    if let Some(inferior) = Inferior::new(&self.target, &args) {
+                    if let Some(inferior) = Inferior::new(&self.target, &args, &self.breakpoints) {
                         // Create the inferior
                         self.inferior = Some(inferior);
-                        // TODO (milestone 1): make the inferior run
-                        // You may use self.inferior.as_mut().unwrap() to get a mutable reference
-                        // to the Inferior object
-                        // let inf = self.inferior.as_mut().unwrap();
-                        // let status:Status = None;
                         self.run_from_cont();
                     } else {
                         println!("Error starting subprocess");
                     }
                 }
                 DebuggerCommand::Quit => {
-                    // TODO: stop the child process here too
                     self.flush_inferior();
                     return;
                 }
@@ -111,7 +109,19 @@ impl Debugger {
                         .print_backtrace(&self.debug_data)
                         .unwrap();
                 }
+                DebuggerCommand::AddBreakpoint(arg) => {
+                    let target_addr = parse_address(&arg.to_string()).unwrap_or(0);
+                    self.breakpoints.push(target_addr);
+                    println!("Set breakpoint {} at {}", self.breakpoints.len() - 1, arg);
+                    self.add_breakpoint_to_process(&target_addr);
+                }
             }
+        }
+    }
+
+    fn add_breakpoint_to_process(&mut self, target_addr: &u64) {
+        if self.inferior.is_some() {
+            self.inferior.as_mut().unwrap().add_breakpoint(target_addr);
         }
     }
 
@@ -155,4 +165,13 @@ impl Debugger {
             }
         }
     }
+}
+
+fn parse_address(addr: &str) -> Option<u64> {
+    let addr_without_0x = if addr.to_lowercase().starts_with("*0x") {
+        &addr[3..]
+    } else {
+        &addr
+    };
+    u64::from_str_radix(addr_without_0x, 16).ok()
 }
