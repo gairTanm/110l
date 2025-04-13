@@ -1,4 +1,5 @@
 use crate::debugger_command::DebuggerCommand;
+use crate::dwarf_data::{DwarfData, Line, Error as DwarfError};
 use crate::inferior::{Inferior, Status};
 use rustyline::error::ReadlineError;
 use rustyline::Editor;
@@ -7,6 +8,7 @@ pub struct Debugger {
     target: String,
     history_path: String,
     readline: Editor<()>,
+    debug_data: DwarfData,
     inferior: Option<Inferior>,
 }
 
@@ -14,6 +16,18 @@ impl Debugger {
     /// Initializes the debugger.
     pub fn new(target: &str) -> Debugger {
         // TODO (milestone 3): initialize the DwarfData
+
+        let debug_data = match DwarfData::from_file(target) {
+            Ok(val) => val,
+            Err(DwarfError::ErrorOpeningFile) => {
+                println!("Could not open file {}", target);
+                std::process::exit(1);
+            }
+            Err(DwarfError::DwarfFormatError(err)) => {
+                println!("Could not debugging symbols from {}: {:?}", target, err);
+                std::process::exit(1);
+            }
+        };
 
         let history_path = format!("{}/.deet_history", std::env::var("HOME").unwrap());
         let mut readline = Editor::<()>::new();
@@ -24,6 +38,7 @@ impl Debugger {
             target: target.to_string(),
             history_path,
             readline,
+            debug_data,
             inferior: None,
         }
     }
@@ -35,12 +50,24 @@ impl Debugger {
         }
         let status = self.inferior.as_mut().unwrap().cont().unwrap();
         match status {
-            Status::Signaled(sig) => println!("Child signaled (signal {})", sig),
+            Status::Signaled(sig) => println!("\nChild signaled (signal {})", sig),
             Status::Exited(code) => {
                 println!("Child exited (status {})", code);
                 self.inferior = None;
             }
-            Status::Stopped(sig, _) => println!("Child stopped (signal {})", sig),
+            Status::Stopped(sig, line_info) => {
+                println!("Child stopped (signal {})", sig);
+                println!(
+                    "Stopped at {}",
+                    self.debug_data
+                        .get_line_from_addr(line_info)
+                        .unwrap_or(Line {
+                            file: String::from(""),
+                            number: 0,
+                            address: 0,
+                        })
+                );
+            }
         }
     }
 
@@ -55,7 +82,7 @@ impl Debugger {
         loop {
             match self.get_next_command() {
                 DebuggerCommand::Run(args) => {
-                        self.flush_inferior();
+                    self.flush_inferior();
                     if let Some(inferior) = Inferior::new(&self.target, &args) {
                         // Create the inferior
                         self.inferior = Some(inferior);
@@ -71,11 +98,18 @@ impl Debugger {
                 }
                 DebuggerCommand::Quit => {
                     // TODO: stop the child process here too
-                        self.flush_inferior();
+                    self.flush_inferior();
                     return;
                 }
                 DebuggerCommand::Continue => {
                     self.run_from_cont();
+                }
+                DebuggerCommand::Backtrace => {
+                    self.inferior
+                        .as_mut()
+                        .unwrap()
+                        .print_backtrace(&self.debug_data)
+                        .unwrap();
                 }
             }
         }

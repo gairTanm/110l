@@ -1,10 +1,11 @@
+use crate::dwarf_data::{DwarfData, Line};
 use nix::sys::ptrace;
 use nix::sys::signal;
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::Pid;
-use std::process::{Child, Command};
-use std::os::unix::process::CommandExt;
 use std::error::Error;
+use std::os::unix::process::CommandExt;
+use std::process::{Child, Command};
 
 pub enum Status {
     /// Indicates inferior stopped. Contains the signal that stopped the process, as well as the
@@ -46,16 +47,12 @@ impl Inferior {
 
         unsafe { cmd.pre_exec(child_traceme) };
 
-        let mut child = cmd
-            .spawn()
-            .expect("couldn't create the child process");
+        let mut child = cmd.spawn().expect("couldn't create the child process");
 
-        Some(Inferior {
-            child
-        })
+        Some(Inferior { child })
     }
 
-    pub fn kill(&mut self) ->() {
+    pub fn kill(&mut self) -> () {
         self.child.kill().expect("couldn't kill the process");
         let status = self.child.wait().expect("failed to reap child");
         println!("Killed inferior process {} with {}", self.pid(), status);
@@ -83,5 +80,35 @@ impl Inferior {
             }
             other => panic!("waitpid returned unexpected status: {:?}", other),
         })
+    }
+
+    pub fn print_backtrace(&self, dwarf_data: &DwarfData) -> Result<(), nix::Error> {
+        println!("hello");
+        let regs = ptrace::getregs(self.pid()).unwrap();
+
+        let mut rbp = regs.rbp as usize;
+        let mut rip = regs.rip as usize;
+        let mut rbp_plus_8 = 0 as usize;
+
+        loop {
+            let line = dwarf_data.get_line_from_addr(rip).unwrap_or(Line {
+                file: String::from(""),
+                number: 0,
+                address: 0,
+            });
+            let function = dwarf_data
+                .get_function_from_addr(rip)
+                .unwrap_or(String::from("couldn't find the function"));
+
+            println!("{} ({})", function, line);
+            if function == String::from("main"){
+                break;
+            }
+            rbp_plus_8 = rbp + 8;
+            rip = ptrace::read(self.pid(),rbp_plus_8  as ptrace::AddressType)? as usize;
+            rbp = ptrace::read(self.pid(), rbp as ptrace::AddressType)? as usize;
+        }
+
+        Ok(())
     }
 }
