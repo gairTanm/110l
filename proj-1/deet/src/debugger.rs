@@ -1,5 +1,5 @@
 use crate::debugger_command::DebuggerCommand;
-use crate::inferior::Inferior;
+use crate::inferior::{Inferior, Status};
 use rustyline::error::ReadlineError;
 use rustyline::Editor;
 
@@ -28,22 +28,54 @@ impl Debugger {
         }
     }
 
+    fn run_from_cont(&mut self) {
+        if self.inferior.is_none() {
+            println!("Error: not tracking any process");
+            return;
+        }
+        let status = self.inferior.as_mut().unwrap().cont().unwrap();
+        match status {
+            Status::Signaled(sig) => println!("Child signaled (signal {})", sig),
+            Status::Exited(code) => {
+                println!("Child exited (status {})", code);
+                self.inferior = None;
+            }
+            Status::Stopped(sig, _) => println!("Child stopped (signal {})", sig),
+        }
+    }
+
+    fn flush_inferior(&mut self) {
+        if self.inferior.is_some() {
+            self.inferior.as_mut().unwrap().kill();
+            self.inferior = None;
+        }
+    }
+
     pub fn run(&mut self) {
         loop {
             match self.get_next_command() {
                 DebuggerCommand::Run(args) => {
+                        self.flush_inferior();
                     if let Some(inferior) = Inferior::new(&self.target, &args) {
                         // Create the inferior
                         self.inferior = Some(inferior);
                         // TODO (milestone 1): make the inferior run
                         // You may use self.inferior.as_mut().unwrap() to get a mutable reference
                         // to the Inferior object
+                        // let inf = self.inferior.as_mut().unwrap();
+                        // let status:Status = None;
+                        self.run_from_cont();
                     } else {
                         println!("Error starting subprocess");
                     }
                 }
                 DebuggerCommand::Quit => {
+                    // TODO: stop the child process here too
+                        self.flush_inferior();
                     return;
+                }
+                DebuggerCommand::Continue => {
+                    self.run_from_cont();
                 }
             }
         }
