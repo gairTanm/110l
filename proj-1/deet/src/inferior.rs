@@ -57,7 +57,8 @@ impl Inferior {
 
     pub fn kill(&mut self) ->() {
         self.child.kill().expect("couldn't kill the process");
-        println!("Killed inferior process {}", self.pid());
+        let status = self.child.wait().expect("failed to reap child");
+        println!("Killed inferior process {} with {}", self.pid(), status);
     }
 
     pub fn cont(&self) -> Result<Status, nix::Error> {
