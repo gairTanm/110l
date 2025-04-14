@@ -39,8 +39,6 @@ impl Breakpoint {
 impl Debugger {
     /// Initializes the debugger.
     pub fn new(target: &str) -> Debugger {
-        // TODO (milestone 3): initialize the DwarfData
-
         let debug_data = match DwarfData::from_file(target) {
             Ok(val) => val,
             Err(DwarfError::ErrorOpeningFile) => {
@@ -57,7 +55,6 @@ impl Debugger {
 
         let history_path = format!("{}/.deet_history", std::env::var("HOME").unwrap());
         let mut readline = Editor::<()>::new();
-        // Attempt to load history from ~/.deet_history if it exists
         let _ = readline.load_history(&history_path);
 
         Debugger {
@@ -161,14 +158,11 @@ impl Debugger {
 
     fn get_next_command(&mut self) -> DebuggerCommand {
         loop {
-            // Print prompt and get next line of user input
             match self.readline.readline("(deet) ") {
                 Err(ReadlineError::Interrupted) => {
-                    // User pressed ctrl+c. We're going to ignore it
                     println!("Type \"quit\" to exit");
                 }
                 Err(ReadlineError::Eof) => {
-                    // User pressed ctrl+d, which is the equivalent of "quit" for our purposes
                     return DebuggerCommand::Quit;
                 }
                 Err(err) => {
