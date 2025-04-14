@@ -5,7 +5,6 @@ use nix::sys::signal;
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::Pid;
 use std::collections::HashMap;
-use std::error::Error;
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command};
 
@@ -96,7 +95,6 @@ impl Inferior {
     }
 
     fn write_byte(&mut self, addr: u64, val: u8) -> Result<u8, nix::Error> {
-        // println!("writing byte {:#x} at {:#x}", val, addr);
         let aligned_addr = align_addr_to_word(addr);
         let byte_offset = addr - aligned_addr;
         let word = ptrace::read(self.pid(), aligned_addr as ptrace::AddressType)? as u64;
@@ -128,7 +126,6 @@ impl Inferior {
                 Status::Stopped(sig, _) => sig == nix::sys::signal::SIGTRAP,
                 _ => false,
             };
-            // println!("exec'd {:#x} with sigtrap: {}", bp.get_addr(), is_sigtrap);
             if !is_sigtrap {
                 return Ok(status);
             }
@@ -136,8 +133,7 @@ impl Inferior {
             self.add_breakpoint(bp.get_addr());
         }
 
-        // println!("continuing run");
-        ptrace::cont(self.pid(), None);
+        let _ = ptrace::cont(self.pid(), None);
         let status = self.wait(None).unwrap();
 
         Ok(status)
@@ -167,7 +163,7 @@ impl Inferior {
 
         let mut rbp = regs.rbp as usize;
         let mut rip = regs.rip as usize;
-        let mut rbp_plus_8 = 0 as usize;
+        let mut rbp_plus_8: usize;
 
         loop {
             let line = dwarf_data.get_line_from_addr(rip).unwrap_or(Line {
