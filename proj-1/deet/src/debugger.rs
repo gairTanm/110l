@@ -1,5 +1,6 @@
 use crate::debugger_command::DebuggerCommand;
-use crate::inferior::Inferior;
+use crate::dwarf_data::{DwarfData, Error as DwarfError, Line};
+use crate::inferior::{Inferior, Status};
 use rustyline::error::ReadlineError;
 use rustyline::Editor;
 
@@ -7,13 +8,52 @@ pub struct Debugger {
     target: String,
     history_path: String,
     readline: Editor<()>,
+    debug_data: DwarfData,
+    breakpoints: Vec<u64>,
     inferior: Option<Inferior>,
+}
+
+#[derive(Clone, Debug)]
+pub struct Breakpoint {
+    addr: u64,
+    orig_byte: u8,
+}
+
+impl Breakpoint {
+    pub fn new(addr: u64) -> Breakpoint {
+        return Breakpoint { addr, orig_byte: 0 };
+    }
+
+    pub fn set_orig_byte(&mut self, orig_byte: u8) {
+        self.orig_byte = orig_byte;
+    }
+
+    pub fn get_orig_byte(&self) -> u8 {
+        self.orig_byte
+    }
+    pub fn get_addr(&self) -> u64 {
+        self.addr
+    }
 }
 
 impl Debugger {
     /// Initializes the debugger.
     pub fn new(target: &str) -> Debugger {
         // TODO (milestone 3): initialize the DwarfData
+
+        let debug_data = match DwarfData::from_file(target) {
+            Ok(val) => val,
+            Err(DwarfError::ErrorOpeningFile) => {
+                println!("Could not open file {}", target);
+                std::process::exit(1);
+            }
+            Err(DwarfError::DwarfFormatError(err)) => {
+                println!("Could not debugging symbols from {}: {:?}", target, err);
+                std::process::exit(1);
+            }
+        };
+
+        debug_data.print();
 
         let history_path = format!("{}/.deet_history", std::env::var("HOME").unwrap());
         let mut readline = Editor::<()>::new();
@@ -24,7 +64,46 @@ impl Debugger {
             target: target.to_string(),
             history_path,
             readline,
+            debug_data,
+            breakpoints: vec![],
             inferior: None,
+        }
+    }
+
+    fn run_from_cont(&mut self) {
+        if self.inferior.is_none() {
+            println!("Error: not tracking any process");
+            return;
+        }
+        let status = self.inferior.as_mut().unwrap().cont().unwrap();
+        match status {
+            Status::Signaled(sig) => println!("\nChild signaled (signal {})", sig),
+            Status::Exited(code) => {
+                println!("Child exited (status {})", code);
+                self.inferior = None;
+            }
+            Status::Stopped(sig, line_info) => {
+                println!("Child stopped (signal {})", sig);
+                if sig == nix::sys::signal::SIGTRAP {
+                    println!(
+                        "Stopped at {}",
+                        self.debug_data
+                            .get_line_from_addr(line_info)
+                            .unwrap_or(Line {
+                                file: String::from(""),
+                                number: 0,
+                                address: 0,
+                            })
+                    );
+                }
+            }
+        }
+    }
+
+    fn flush_inferior(&mut self) {
+        if self.inferior.is_some() {
+            self.inferior.as_mut().unwrap().kill();
+            self.inferior = None;
         }
     }
 
@@ -32,27 +111,54 @@ impl Debugger {
         loop {
             match self.get_next_command() {
                 DebuggerCommand::Run(args) => {
-                    if let Some(inferior) = Inferior::new(&self.target, &args) {
-                        // Create the inferior
+                    self.flush_inferior();
+                    if let Some(inferior) =
+                        Inferior::new(&self.target, &args, &mut self.breakpoints)
+                    {
                         self.inferior = Some(inferior);
-                        // TODO (milestone 1): make the inferior run
-                        // You may use self.inferior.as_mut().unwrap() to get a mutable reference
-                        // to the Inferior object
+                        self.run_from_cont();
                     } else {
                         println!("Error starting subprocess");
                     }
                 }
                 DebuggerCommand::Quit => {
+                    self.flush_inferior();
                     return;
+                }
+                DebuggerCommand::Continue => {
+                    self.run_from_cont();
+                }
+                DebuggerCommand::Backtrace => {
+                    self.inferior
+                        .as_mut()
+                        .unwrap()
+                        .print_backtrace(&self.debug_data)
+                        .unwrap();
+                }
+                DebuggerCommand::AddBreakpoint(arg) => {
+                    let target_addr = match parse_address(&arg.to_string(), &self.debug_data) {
+                        Some(val) => val,
+                        None => 0,
+                    };
+
+                    if target_addr == 0 {
+                        println!("Doesn't match an address, a line or a function name");
+                    } else {
+                        self.breakpoints.push(target_addr);
+                        println!("Set breakpoint {} at {}", self.breakpoints.len() - 1, arg);
+                        self.add_breakpoint_to_process(target_addr);
+                    }
                 }
             }
         }
     }
 
-    /// This function prompts the user to enter a command, and continues re-prompting until the user
-    /// enters a valid command. It uses DebuggerCommand::from_tokens to do the command parsing.
-    ///
-    /// You don't need to read, understand, or modify this function.
+    fn add_breakpoint_to_process(&mut self, breakpoint: u64) {
+        if self.inferior.is_some() {
+            self.inferior.as_mut().unwrap().add_breakpoint(breakpoint);
+        }
+    }
+
     fn get_next_command(&mut self) -> DebuggerCommand {
         loop {
             // Print prompt and get next line of user input
@@ -86,6 +192,33 @@ impl Debugger {
                         println!("Unrecognized command.");
                     }
                 }
+            }
+        }
+    }
+}
+
+fn parse_address(addr: &str, dwarf_data: &DwarfData) -> Option<u64> {
+    let mut is_hex = false;
+    let addr_without_0x = if addr.to_lowercase().starts_with("*0x") {
+        is_hex = true;
+        &addr[3..]
+    } else {
+        &addr
+    };
+    match u64::from_str_radix(addr_without_0x, 16).ok() {
+        Some(val) => {
+            if is_hex {
+                return Some(val as u64);
+            }
+            match dwarf_data.get_addr_for_line(None, val as usize) {
+                Some(val) => Some(val as u64),
+                None => None,
+            }
+        }
+        None => {
+            return match dwarf_data.get_addr_for_function(None, addr) {
+                Some(val) => Some(val as u64),
+                None => None,
             }
         }
     }

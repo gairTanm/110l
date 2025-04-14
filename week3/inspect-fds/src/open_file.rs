@@ -3,6 +3,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 #[allow(unused_imports)] // TODO: delete this line for Milestone 4
 use std::{fmt, fs};
+use std::path::{Path, PathBuf};
 
 #[allow(unused)] // TODO: delete this line for Milestone 4
 const O_WRONLY: usize = 00000001;
@@ -134,10 +135,32 @@ impl OpenFile {
     /// program and we don't need to do fine-grained error handling, so returning Option is a
     /// simple way to indicate that "hey, we weren't able to get the necessary information"
     /// without making a big deal of it.)
-    #[allow(unused)] // TODO: delete this line for Milestone 4
+    // #[allow(unused)] // TODO: delete this line for Milestone 4
     pub fn from_fd(pid: usize, fd: usize) -> Option<OpenFile> {
         // TODO: implement for Milestone 4
-        unimplemented!();
+        // unimplemented!();
+        let fd_path_string = format!("/proc/{}/fd/{}", pid, fd);
+        let fdinfo_path_string = format!("/proc/{}/fdinfo/{}", pid, fd);
+
+        let fd_path = Path::new(&fd_path_string);
+        let fdinfo_path = Path::new(&fdinfo_path_string);
+
+        let fd_link = fs::read_link(fd_path).ok()?;
+
+        let contents = fs::read_to_string(fdinfo_path).ok()?;
+        let cursor = match OpenFile::parse_cursor(&contents){
+            Some(cursor) => cursor,
+            None => 0
+        };
+
+        let access_mode = OpenFile::parse_access_mode(&contents).unwrap();
+
+        Some(OpenFile::new(
+                OpenFile::path_to_name(&fd_link.to_str().unwrap()),
+                cursor,
+                access_mode
+            )
+        )
     }
 
     /// This function returns the OpenFile's name with ANSI escape codes included to colorize

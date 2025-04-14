@@ -15,21 +15,54 @@ impl Process {
         Process { pid, ppid, command }
     }
 
+
+    pub fn print(&self) {
+        println!("======== \"{}\" (pid {}, ppid {}) ========", self.command, self.pid, self.ppid);
+        let open_files = self.list_open_files();
+        match open_files {
+            Some(open_files) => {
+                for (fd, file) in open_files {
+                    println!(
+                        "{}\t{:<15}\t\tcursor: {}\t\t{}",
+                        fd,
+                        format!("({})", file.access_mode),
+                        file.cursor,
+                        file.colorized_name()
+                    )
+                }
+            }
+            None => {
+                println!("Couldn't find fds for this process :(")
+            }
+        }
+    }
     /// This function returns a list of file descriptor numbers for this Process, if that
     /// information is available (it will return None if the information is unavailable). The
     /// information will commonly be unavailable if the process has exited. (Zombie processes
     /// still have a pid, but their resources have already been freed, including the file
     /// descriptor table.)
-    #[allow(unused)] // TODO: delete this line for Milestone 3
+    // #[allow(unused)] // TODO: delete this line for Milestone 3
     pub fn list_fds(&self) -> Option<Vec<usize>> {
         // TODO: implement for Milestone 3
-        unimplemented!();
+        let path = format!("/proc/{}/fd", self.pid);
+
+        let dir = fs::read_dir(path).ok()?;
+        let mut res: Vec<usize> = Vec::new();
+        for fd in dir {
+            let fd = fd.ok()?;
+            let fd = fd.file_name()
+                .to_str()?
+                .parse::<usize>().ok()?;
+            res.push(fd);
+        }
+
+        Some(res)
     }
 
     /// This function returns a list of (fdnumber, OpenFile) tuples, if file descriptor
     /// information is available (it returns None otherwise). The information is commonly
     /// unavailable if the process has already exited.
-    #[allow(unused)] // TODO: delete this line for Milestone 4
+    // #[allow(unused)] // TODO: delete this line for Milestone 4
     pub fn list_open_files(&self) -> Option<Vec<(usize, OpenFile)>> {
         let mut open_files = vec![];
         for fd in self.list_fds()? {
