@@ -66,17 +66,45 @@ fn get_input_numbers() -> VecDeque<u32> {
     numbers
 }
 
-fn main() {
-    let num_threads = num_cpus::get();
-    println!("Farm starting on {} CPUs", num_threads);
+fn threaded_factor(num_threads: usize, numbers: VecDeque<u32>) {
     let start = Instant::now();
-
-    // TODO: call get_input_numbers() and store a queue of numbers to factor
-
+    let numbers_mutex = Arc::new(Mutex::new(numbers));
+    let mut threads = Vec::with_capacity(num_threads);
     // TODO: spawn `num_threads` threads, each of which pops numbers off the queue and calls
     // factor_number() until the queue is empty
+    for _ in 0..num_threads {
+        let mut_clone = Arc::clone(&numbers_mutex);
+        //let numbers_mutex_clone = Arc::clone(&numbers_mutex);
+        threads.push(thread::spawn(move || loop {
+            let _result = {
+                let mut num = mut_clone.lock().unwrap();
+                num.pop_back()
+            };
+
+            match _result {
+                Some(val) => factor_number(val),
+                None => break,
+            }
+        }))
+    }
 
     // TODO: join all the threads you created
 
+    for thread in threads {
+        thread.join().unwrap()
+    }
     println!("Total execution time: {:?}", start.elapsed());
+}
+
+fn main() {
+    let num_threads = num_cpus::get();
+    let single_thread = 1;
+    println!("Farm starting on {} CPUs", num_threads);
+
+    // TODO: call get_input_numbers() and store a queue of numbers to factor
+    let numbers = get_input_numbers();
+    let numbers_single = numbers.clone();
+
+    threaded_factor(num_threads, numbers);
+    threaded_factor(single_thread, numbers_single);
 }
