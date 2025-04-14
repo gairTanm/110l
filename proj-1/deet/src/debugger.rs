@@ -136,10 +136,18 @@ impl Debugger {
                         .unwrap();
                 }
                 DebuggerCommand::AddBreakpoint(arg) => {
-                    let target_addr = parse_address(&arg.to_string()).unwrap_or(0);
-                    self.breakpoints.push(target_addr);
-                    println!("Set breakpoint {} at {}", self.breakpoints.len() - 1, arg);
-                    self.add_breakpoint_to_process(target_addr);
+                    let target_addr = match parse_address(&arg.to_string(), &self.debug_data) {
+                        Some(val) => val,
+                        None => 0,
+                    };
+
+                    if target_addr == 0 {
+                        println!("Doesn't match an address, a line or a function name");
+                    } else {
+                        self.breakpoints.push(target_addr);
+                        println!("Set breakpoint {} at {}", self.breakpoints.len() - 1, arg);
+                        self.add_breakpoint_to_process(target_addr);
+                    }
                 }
             }
         }
@@ -189,11 +197,29 @@ impl Debugger {
     }
 }
 
-fn parse_address(addr: &str) -> Option<u64> {
+fn parse_address(addr: &str, dwarf_data: &DwarfData) -> Option<u64> {
+    let mut is_hex = false;
     let addr_without_0x = if addr.to_lowercase().starts_with("*0x") {
+        is_hex = true;
         &addr[3..]
     } else {
         &addr
     };
-    u64::from_str_radix(addr_without_0x, 16).ok()
+    match u64::from_str_radix(addr_without_0x, 16).ok() {
+        Some(val) => {
+            if is_hex {
+                return Some(val as u64);
+            }
+            match dwarf_data.get_addr_for_line(None, val as usize) {
+                Some(val) => Some(val as u64),
+                None => None,
+            }
+        }
+        None => {
+            return match dwarf_data.get_addr_for_function(None, addr) {
+                Some(val) => Some(val as u64),
+                None => None,
+            }
+        }
+    }
 }
