@@ -13,6 +13,29 @@ pub struct Debugger {
     inferior: Option<Inferior>,
 }
 
+#[derive(Clone, Debug)]
+pub struct Breakpoint {
+    addr: u64,
+    orig_byte: u8,
+}
+
+impl Breakpoint {
+    pub fn new(addr: u64) -> Breakpoint {
+        return Breakpoint { addr, orig_byte: 0 };
+    }
+
+    pub fn set_orig_byte(&mut self, orig_byte: u8) {
+        self.orig_byte = orig_byte;
+    }
+
+    pub fn get_orig_byte(&self) -> u8 {
+        self.orig_byte
+    }
+    pub fn get_addr(&self) -> u64 {
+        self.addr
+    }
+}
+
 impl Debugger {
     /// Initializes the debugger.
     pub fn new(target: &str) -> Debugger {
@@ -61,16 +84,18 @@ impl Debugger {
             }
             Status::Stopped(sig, line_info) => {
                 println!("Child stopped (signal {})", sig);
-                println!(
-                    "Stopped at {}",
-                    self.debug_data
-                        .get_line_from_addr(line_info)
-                        .unwrap_or(Line {
-                            file: String::from(""),
-                            number: 0,
-                            address: 0,
-                        })
-                );
+                if sig == nix::sys::signal::SIGTRAP {
+                    println!(
+                        "Stopped at {}",
+                        self.debug_data
+                            .get_line_from_addr(line_info)
+                            .unwrap_or(Line {
+                                file: String::from(""),
+                                number: 0,
+                                address: 0,
+                            })
+                    );
+                }
             }
         }
     }
@@ -87,8 +112,9 @@ impl Debugger {
             match self.get_next_command() {
                 DebuggerCommand::Run(args) => {
                     self.flush_inferior();
-                    if let Some(inferior) = Inferior::new(&self.target, &args, &self.breakpoints) {
-                        // Create the inferior
+                    if let Some(inferior) =
+                        Inferior::new(&self.target, &args, &mut self.breakpoints)
+                    {
                         self.inferior = Some(inferior);
                         self.run_from_cont();
                     } else {
@@ -113,22 +139,18 @@ impl Debugger {
                     let target_addr = parse_address(&arg.to_string()).unwrap_or(0);
                     self.breakpoints.push(target_addr);
                     println!("Set breakpoint {} at {}", self.breakpoints.len() - 1, arg);
-                    self.add_breakpoint_to_process(&target_addr);
+                    self.add_breakpoint_to_process(target_addr);
                 }
             }
         }
     }
 
-    fn add_breakpoint_to_process(&mut self, target_addr: &u64) {
+    fn add_breakpoint_to_process(&mut self, breakpoint: u64) {
         if self.inferior.is_some() {
-            self.inferior.as_mut().unwrap().add_breakpoint(target_addr);
+            self.inferior.as_mut().unwrap().add_breakpoint(breakpoint);
         }
     }
 
-    /// This function prompts the user to enter a command, and continues re-prompting until the user
-    /// enters a valid command. It uses DebuggerCommand::from_tokens to do the command parsing.
-    ///
-    /// You don't need to read, understand, or modify this function.
     fn get_next_command(&mut self) -> DebuggerCommand {
         loop {
             // Print prompt and get next line of user input
