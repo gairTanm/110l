@@ -3,6 +3,7 @@ mod response;
 
 use clap::Parser;
 use rand::{Rng, SeedableRng};
+use reqwest::Body;
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
@@ -21,7 +22,7 @@ struct CmdOptions {
     #[arg(short, long)]
     upstream: Vec<String>,
     /// "Perform active health checks on this interval (in seconds)"
-    #[arg(long, default_value = "10")]
+    #[arg(long, default_value = "2")]
     active_health_check_interval: usize,
     /// "Path to send request to for active health checks"
     #[arg(long, default_value = "/")]
@@ -50,7 +51,6 @@ struct ProxyState {
     upstream_addresses: Arc<Mutex<HashMap<String, bool>>>,
 
     next_connection: Arc<Mutex<usize>>,
-    _debug: usize,
 }
 
 impl ProxyState {
@@ -106,11 +106,21 @@ async fn main() {
         active_health_check_path: options.active_health_check_path,
         max_requests_per_minute: options.max_requests_per_minute,
         next_connection: Arc::new(Mutex::new(0)),
-        _debug: 0,
     });
     //let state_mutex = Arc::new(Mutex::new(state));
 
     //let mut worker_threads = Vec::new();
+
+    let health_state_clone = Arc::clone(&state);
+    tokio::spawn(async move {
+        loop {
+            perform_health_check(&health_state_clone).await;
+            tokio::time::sleep(std::time::Duration::from_secs(
+                health_state_clone.active_health_check_interval as u64,
+            ))
+            .await;
+        }
+    });
 
     loop {
         if let Ok((stream, _)) = listener.accept().await {
@@ -121,18 +131,32 @@ async fn main() {
         }
     }
 }
-//
-//#[derive(Debug)]
-//struct DeadUpstreamError;
-//
-//impl fmt::Display for DeadUpstreamError {
-//    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-//        write!("Failed to connect to any upstream server")
-//    }
-//}
+
+async fn perform_health_check(state: &Arc<ProxyState>) {
+    let mut upstream_addresses = state.upstream_addresses.lock().await;
+    let client = reqwest::Client::new();
+    for (upstream, available) in upstream_addresses.iter_mut() {
+        let request_path = state.active_health_check_path.clone();
+        let response = client
+            .get(&format!("http://{}/{}", upstream, request_path))
+            .header("Host", upstream)
+            .send()
+            .await
+            .ok();
+        //log::info!(
+        //    "Response {:?} Request path: {:?}",
+        //    response,
+        //    ("http://{}/", upstream, request_path)
+        //);
+        if response.is_some() {
+            *available = response.unwrap().status().as_u16() == 200;
+            log::info!("Upstream {:?} is available: {:?}", *upstream, *available);
+        }
+    }
+}
 
 async fn connect_to_upstream(state: Arc<ProxyState>) -> Result<Vec<TcpStream>, std::io::Error> {
-    let mut upstream_addresses = state.upstream_addresses.lock().await.clone();
+    let mut upstream_addresses = state.upstream_addresses.lock().await;
     //let upstream_idx = rng.gen_range(0..state.upstream_addresses.len());
     //let upstream_ip = &state.upstream_addresses[upstream_idx];
     let mut stream: Option<TcpStream>;
@@ -145,10 +169,10 @@ async fn connect_to_upstream(state: Arc<ProxyState>) -> Result<Vec<TcpStream>, s
                     log::warn!("Failed to connect to upstream {}: {}", upstream_ip, err);
                     *available = false;
                     None
-                    //Err(err)
                 }
             };
             if stream.is_some() {
+                log::info!("{:?}", stream);
                 streams.push(stream.unwrap());
             };
         }
@@ -162,8 +186,6 @@ async fn connect_to_upstream(state: Arc<ProxyState>) -> Result<Vec<TcpStream>, s
     }
 
     Ok(streams)
-
-    // TODO: implement failover (milestone 3)
 }
 
 async fn send_response(client_conn: &mut TcpStream, response: &http::Response<Vec<u8>>) {
@@ -196,13 +218,13 @@ async fn handle_connection(mut client_conn: TcpStream, state: Arc<ProxyState>) {
     for upstream_conn in upstream_conns.iter() {
         upstream_ips.push(upstream_conn.peer_addr().unwrap().ip().to_string());
     }
-    log::info!("{:?} {:?}", upstream_ips, upstream_conns);
+    //log::info!("Working upstreams: {:?} {:?}", upstream_ips, upstream_conns);
     // The client may now send us one or more requests. Keep trying to read requests until the
     // client hangs up or we get an error.
     loop {
         let state = Arc::clone(&state);
         let idx = state.get_connection_index(upstream_ips.len()).await;
-        log::info!("routing to: {:?}", idx);
+        //log::info!("routing to: {:?}", idx);
         // Read a request from the client
         let mut request = match request::read_from_stream(&mut client_conn).await {
             Ok(request) => request,
