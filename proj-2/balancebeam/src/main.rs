@@ -2,16 +2,15 @@ mod request;
 mod response;
 
 use clap::Parser;
-use rand::{Rng, SeedableRng};
-use reqwest::Body;
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 
 /// Contains information parsed from the command-line invocation of balancebeam. The Clap macros
-/// provide a fancy way to automatically construct a command-line argument parser.
+/// provide a fancy way to automatically construct a command-line argument parser. #[derive(Parser, Debug)]
 #[derive(Parser, Debug)]
 #[command(about = "Fun with load balancing")]
 struct CmdOptions {
@@ -49,8 +48,10 @@ struct ProxyState {
     max_requests_per_minute: usize,
     /// Addresses of servers that we are proxying to
     upstream_addresses: Arc<Mutex<HashMap<String, bool>>>,
-
+    /// Counter to keep track of the next upstream server to pick
     next_connection: Arc<Mutex<usize>>,
+
+    rate_limiter_service: Arc<Mutex<RateLimiterService>>,
 }
 
 impl ProxyState {
@@ -59,6 +60,48 @@ impl ProxyState {
         *next_connection_idx += 1;
         *next_connection_idx %= count;
         *next_connection_idx
+    }
+}
+
+struct RateLimiterService {
+    max_requests_per_minute: usize,
+
+    client_request_count_map: Arc<Mutex<HashMap<String, HashMap<u64, usize>>>>,
+}
+
+impl RateLimiterService {
+    fn get_current_window(&self) -> u64 {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        // window size 60s
+        now / std::time::Duration::from_secs(60).as_secs()
+    }
+
+    pub async fn should_rate_limit(&mut self, client: &String, port: &String) -> bool {
+        if self.max_requests_per_minute == 0 {
+            return false;
+        };
+        let window = self.get_current_window();
+
+        let mut state = self.client_request_count_map.lock().await;
+        let key = format!("{}{}", client.clone(), port.clone());
+        let bucket_count_for_client = state.entry(key.clone()).or_default();
+        let count = bucket_count_for_client.entry(window).or_insert(0);
+
+        log::info!("For {} the count is {} in window {}", key, count, window);
+        if *count < self.max_requests_per_minute {
+            *count += 1;
+            false
+        } else {
+            true
+        }
+    }
+
+    pub async fn reset_counts(&mut self) {
+        self.client_request_count_map.lock().await.clear();
     }
 }
 
@@ -99,6 +142,11 @@ async fn main() {
 
     let upstream_addresses = Arc::new(Mutex::new(upstream_address_map));
 
+    let rate_limiter_service = Arc::new(Mutex::new(RateLimiterService {
+        max_requests_per_minute: options.max_requests_per_minute,
+        client_request_count_map: Arc::new(Mutex::new(HashMap::new())),
+    }));
+
     // Handle incoming connections
     let state = Arc::new(ProxyState {
         upstream_addresses,
@@ -106,6 +154,7 @@ async fn main() {
         active_health_check_path: options.active_health_check_path,
         max_requests_per_minute: options.max_requests_per_minute,
         next_connection: Arc::new(Mutex::new(0)),
+        rate_limiter_service,
     });
     //let state_mutex = Arc::new(Mutex::new(state));
 
@@ -114,11 +163,11 @@ async fn main() {
     let health_state_clone = Arc::clone(&state);
     tokio::spawn(async move {
         loop {
-            perform_health_check(&health_state_clone).await;
             tokio::time::sleep(std::time::Duration::from_secs(
                 health_state_clone.active_health_check_interval as u64,
             ))
             .await;
+            perform_health_check(&health_state_clone).await;
         }
     });
 
@@ -126,6 +175,7 @@ async fn main() {
         if let Ok((stream, _)) = listener.accept().await {
             let state = Arc::clone(&state);
             tokio::spawn(async move {
+                //state.rate_limiter_service.lock().await.reset_counts().await;
                 handle_connection(stream, state).await;
             });
         }
@@ -143,11 +193,7 @@ async fn perform_health_check(state: &Arc<ProxyState>) {
             .send()
             .await
             .ok();
-        //log::info!(
-        //    "Response {:?} Request path: {:?}",
-        //    response,
-        //    ("http://{}/", upstream, request_path)
-        //);
+
         if response.is_some() {
             *available = response.unwrap().status().as_u16() == 200;
             log::info!("Upstream {:?} is available: {:?}", *upstream, *available);
@@ -264,6 +310,20 @@ async fn handle_connection(mut client_conn: TcpStream, state: Arc<ProxyState>) {
         // upstream server will only know our IP, not the client's.)
         request::extend_header_value(&mut request, "x-forwarded-for", &client_ip);
 
+        let mut rate_limiter_service = state.rate_limiter_service.lock().await;
+        let port = client_conn.local_addr().unwrap().port().to_string();
+        if rate_limiter_service
+            .should_rate_limit(&client_ip, &port)
+            .await
+        {
+            let response = response::make_http_error(http::StatusCode::TOO_MANY_REQUESTS);
+            //log::info!("{:?}", response);
+            if let Err(error) = response::write_to_stream(&response, &mut client_conn).await {
+                log::warn!("Failed to send response to client: {}", error);
+                return;
+            };
+            continue;
+        }
         // Forward the request to the server
         if let Err(error) = request::write_to_stream(&request, &mut upstream_conns[idx]).await {
             log::error!(
